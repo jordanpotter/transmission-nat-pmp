@@ -1,6 +1,15 @@
 name: Continuous Integration
 
-on: push
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "0 0 * * TUE"
+
+env:
+  GO_VERSION: 1.21
+  ALPINE_VERSION: 3.19
 
 jobs:
   lint:
@@ -9,17 +18,17 @@ jobs:
     permissions:
       contents: read
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '~1.20'
-        cache: false # golangci-lint-action does caching
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "~${{ env.GO_VERSION }}"
+          cache: false # golangci-lint-action does caching
 
-    - name: Lint
-      uses: golangci/golangci-lint-action@v3
+      - name: Lint
+        uses: golangci/golangci-lint-action@v3
 
   test:
     name: Test
@@ -27,19 +36,19 @@ jobs:
     permissions:
       contents: read
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '~1.20'
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "~${{ env.GO_VERSION }}"
 
-    - name: Test
-      run: go test -race -v ./...
+      - name: Test
+        run: go test -race -v ./...
 
-  build:
-    name: Build
+  publish-executable:
+    name: Publish Executable
     needs: [lint, test]
     runs-on: ubuntu-latest
     permissions:
@@ -47,28 +56,79 @@ jobs:
       packages: write
     strategy:
       matrix:
-        os: ['linux', 'darwin']
-        arch: ['amd64', 'arm64']
+        os: ["linux", "darwin"]
+        arch: ["amd64", "arm64"]
     env:
-      app: transmission-nat-pmp.${{ matrix.os }}-${{ matrix.arch }}
+      NAME: transmission-nat-pmp.${{ matrix.os }}-${{ matrix.arch }}
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '~1.20'
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "~${{ env.GO_VERSION }}"
 
-    - name: Build
-      run: go build -o ${{ env.app }} -v ./...
-      env:
-        GOOS: ${{ matrix.os }}
-        GOARCH: ${{ matrix.arch }}
-    
-    - name: Upload
-      uses: actions/upload-artifact@v3
-      with:
-        name: ${{ env.app }}
-        path: ${{ env.app }}
-        if-no-files-found: error
+      - name: Build
+        run: go build -o ${{ env.NAME }} -v ./...
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+
+      - name: Upload
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.NAME }}
+          path: ${{ env.NAME }}
+          if-no-files-found: error
+
+  publish-docker:
+    name: Publish Docker
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log into GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get date
+        id: date
+        uses: josStorer/get-current-time@v2
+        with:
+          format: YYYY-MM-DD
+
+      - name: Get metadata for image
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ steps.date.outputs.formattedTime }},enable=${{ github.event_name == 'schedule' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            GO_VERSION=${{ env.GO_VERSION }}
+            ALPINE_VERSION=${{ env.ALPINE_VERSION }}
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          pull: true
+          push: true
